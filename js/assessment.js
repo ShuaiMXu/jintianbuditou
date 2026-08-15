@@ -15,7 +15,7 @@
 // ============================================================
 
 import { createPoseKernel } from './pose-kernel.js';
-import { recordAssessment } from './health-store.js';
+import { recordAssessment, getTodayFatigue, saveTodayFatigue } from './health-store.js';
 
 // 颈部红旗项(命中任一 → 转介线下,不进游戏)
 const RED_FLAGS_NECK = [
@@ -120,6 +120,68 @@ function introStep(c) {
       wrap.appendChild(opts); box.appendChild(wrap);
     });
     c.querySelector('#asmtIntroNext').addEventListener('click', () => resolve(answers));
+  });
+}
+
+// ——— 疲劳度视觉:环形分数 + 因素 ———
+const FATIGUE_META = {
+  high: { label: '偏疲劳', color: '#FF6B4A', tip: '今天身体信号偏累,建议低强度、慢节奏,量力而行。' },
+  mid:  { label: '略疲劳', color: '#FFA726', tip: '有点小疲劳,适度活动开、别太猛,做完记得回中立位。' },
+  low:  { label: '状态不错', color: '#4CAF88', tip: '今天状态挺好,正常练即可,注意慢而稳。' },
+};
+function fatigueGauge(score, level) {
+  const meta = FATIGUE_META[level] || FATIGUE_META.mid;
+  const R = 46, C = 2 * Math.PI * R, off = C * (1 - score / 100);
+  return `
+    <div style="position:relative;width:132px;height:132px;margin:6px auto 14px;">
+      <svg width="132" height="132" style="transform:rotate(-90deg);">
+        <circle cx="66" cy="66" r="${R}" fill="none" stroke="#EDEDF0" stroke-width="10"/>
+        <circle cx="66" cy="66" r="${R}" fill="none" stroke="${meta.color}" stroke-width="10"
+          stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${off}"/>
+      </svg>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <div style="font-size:34px;font-weight:900;color:${meta.color};line-height:1;">${score}</div>
+        <div style="font-size:12px;color:#6B6B7A;margin-top:2px;">疲劳度</div>
+      </div>
+    </div>`;
+}
+function fatigueFactorsHtml(factors) {
+  if (!factors || !factors.length) return '';
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:6px;">${
+    factors.map(f => `<span style="font-size:12px;color:#6B6B7A;background:#F5F5F7;padding:4px 10px;border-radius:100px;">${f}</span>`).join('')}</div>`;
+}
+
+// 首次问诊后:展示今日疲劳度结果
+function fatigueResultStep(c, fat, isRecap) {
+  return new Promise(resolve => {
+    const meta = FATIGUE_META[fat.level] || FATIGUE_META.mid;
+    c.innerHTML = `
+      <div class="asmt-kicker">AI 问诊 · Joy</div>
+      <div class="asmt-title">今日疲劳度</div>
+      ${fatigueGauge(fat.score, fat.level)}
+      <div style="font-size:15px;font-weight:800;color:${meta.color};margin-bottom:10px;">${meta.label}</div>
+      ${fatigueFactorsHtml(fat.factors)}
+      <div class="asmt-desc">${meta.tip}</div>
+      <button class="asmt-btn" id="asmtFatNext">继续 →</button>
+    `;
+    c.querySelector('#asmtFatNext').addEventListener('click', () => resolve());
+  });
+}
+
+// 当天已测过:回顾今日疲劳度(不重复问诊)
+function fatigueRecapStep(c, fat) {
+  return new Promise(resolve => {
+    const meta = FATIGUE_META[fat.level] || FATIGUE_META.mid;
+    c.innerHTML = `
+      <div class="asmt-kicker">今日已问诊 · Joy</div>
+      <div class="asmt-title">今天的疲劳度</div>
+      ${fatigueGauge(fat.score, fat.level)}
+      <div style="font-size:15px;font-weight:800;color:${meta.color};margin-bottom:10px;">${meta.label}</div>
+      ${fatigueFactorsHtml(fat.factors)}
+      <div class="asmt-desc">今天已经问过啦,直接沿用今日状态~ 明天再帮你重新评估。</div>
+      <button class="asmt-btn" id="asmtFatNext">开始评估 →</button>
+    `;
+    c.querySelector('#asmtFatNext').addEventListener('click', () => resolve());
   });
 }
 
@@ -247,8 +309,19 @@ export async function runAssessment(zone = 'neck') {
   const { c, close } = mask();
 
   try {
-    // 0. AI 问诊(调 /api/intro,每次问题不同,体现现场分析感)。拿不到→跳过。
-    const introAnswers = await introStep(c);
+    // 0. AI 问诊 + 今日疲劳度(一天一次:当天首次问诊并算疲劳度,当天再进直接复用不重复问)。
+    let introAnswers = {};
+    const todayFatigue = getTodayFatigue();
+    if (todayFatigue) {
+      // 今天已测过 → 展示今日疲劳度,跳过问诊
+      await fatigueRecapStep(c, todayFatigue);
+      introAnswers = todayFatigue.answers || {};
+    } else {
+      // 今天首次 → 问诊,折算并存今日疲劳度,展示结果
+      introAnswers = await introStep(c);
+      const fat = saveTodayFatigue(introAnswers);
+      await fatigueResultStep(c, fat, false);
+    }
 
     // 1. 红旗安全确认(固定项,不可省)
     const rf = await redFlagStep(c);

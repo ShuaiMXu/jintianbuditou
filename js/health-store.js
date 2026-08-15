@@ -29,6 +29,8 @@ const DEFAULT_PROFILE = {
   },
   // 最近若干次关卡表现(逐轴),给 AI 看趋势
   recentSessions: [],
+  // 今日疲劳度(一天一次:AI 问诊答案 + 当天行为综合折算)。date 为本地 YYYY-MM-DD。
+  fatigue: { score: null, level: null, date: null, factors: [] },
 };
 
 export function loadProfile() {
@@ -38,6 +40,65 @@ export function loadProfile() {
 
 function save(p) {
   try { localStorage.setItem(KEY, JSON.stringify(p)); } catch {}
+}
+
+// 本地日期串 YYYY-MM-DD(用于"一天一次"判断)
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// 今日疲劳度:今天已测 → 返回 {score,level,factors};未测(或跨天)→ null
+export function getTodayFatigue() {
+  const p = loadProfile();
+  const f = p.fatigue || {};
+  if (f.score != null && f.date === todayStr()) {
+    return { score: f.score, level: f.level, factors: f.factors || [], answers: f.answers || {} };
+  }
+  return null;
+}
+
+// 疲劳度折算(问诊答案 + 当天关卡行为综合)。answers:{feel,goal,duration,sleep,...}
+// 返回 {score(0-100,越高越累), level, factors[]}。分数越高越疲劳。
+export function computeFatigue(answers = {}) {
+  let score = 30;               // 基线
+  const factors = [];
+  // —— 问诊主观答案 ——
+  if (answers.feel === '酸胀') { score += 30; factors.push('颈肩酸胀'); }
+  else if (answers.feel === '发紧') { score += 18; factors.push('颈肩发紧'); }
+  if (answers.duration === '半天没动了') { score += 20; factors.push('久坐半天未动'); }
+  else if (answers.duration === '两三小时') { score += 10; factors.push('连续久坐两三小时'); }
+  if (answers.sleep === '落枕/没睡好') { score += 20; factors.push('睡眠不佳'); }
+  else if (answers.sleep === '一般') { score += 8; }
+  if (answers.mood === '压力山大') { score += 10; factors.push('压力偏大'); }
+  else if (answers.mood === '有点累') { score += 5; }
+  // —— 当天关卡行为:今天练得越多/甩头越多,越显示已疲劳 ——
+  const p = loadProfile();
+  const today = todayStr();
+  const todaySessions = (p.recentSessions || []).filter(s => {
+    if (!s.ts) return false;
+    const d = new Date(s.ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === today;
+  });
+  if (todaySessions.length >= 3) { score += 12; factors.push(`今日已练 ${todaySessions.length} 次`); }
+  const flings = todaySessions.reduce((s, x) => s + (x.flingCount || 0), 0);
+  if (flings >= 5) { score += 8; factors.push('动作偏急(甩头较多)'); }
+  // —— 基础资料:久坐族天然疲劳基线略高 ——
+  const sit = p.profile && p.profile.sitHoursPerDay;
+  if (sit >= 8) { score += 8; factors.push(`日均久坐约 ${sit} 小时`); }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const level = score >= 70 ? 'high' : score >= 45 ? 'mid' : 'low';
+  return { score, level, factors: factors.slice(0, 4) };
+}
+
+// 写入今日疲劳度(一天一次)
+export function saveTodayFatigue(answers = {}) {
+  const r = computeFatigue(answers);
+  const p = loadProfile();
+  p.fatigue = { score: r.score, level: r.level, date: todayStr(), factors: r.factors, answers, ts: Date.now() };
+  save(p);
+  return r;
 }
 
 // 基础资料录入写入(onboarding 对话式录入调用)。只覆盖传入的非空字段,自动算 BMI。
